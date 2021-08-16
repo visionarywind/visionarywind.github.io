@@ -1,0 +1,136 @@
+## 简介
+
+从Spring Framework 5.0版本起, 引入了响应式web框架Spring WebFlux, 通过异步非阻塞, 能够极大提高服务器的吞吐量
+Spring WebFlux基于Spring,能够使用Spring的基础能力, 底层默认使用netty server,也可以使用异步Servlet，当前Springboot支持servlet,也支持WebFlux
+简单点说,Spring提供了两套web栈：即
+Springboot servlet stack = Spring MVC + servlet api + Spring data + Spring security
+Springboot reactive stack = Spring WebFlux + Spring data reactive + Spring security
+借用官网的图
+![reactive stack vs servlet stack](https://spring.io/images/diagram-reactive-dark-31d740ed8e454af5f1b8d55ae716525d.svg) 
+因为技术栈兼容性问题，Spring MVC直接改造Spring WebFlux需要进行适配，WebFlux兼容Spring MVC的注解，可以减少一定的工作量，主要适配的点在于底层模型不同导致的匹配，如filter，advice，interceptor, converter等
+![mvc vs webflux](https://docs.spring.io/spring-framework/docs/current/reference/html/images/spring-mvc-and-webflux-venn.png)
+
+- Spring MVC  
+同步阻塞I/O模型, 建立在Servlet API之上，声明式编程，符合思维逻辑，易于开发以及调试
+
+- Spring WebFlux  
+异步非阻塞I/O模型, 建立在Reactive Streams Adapter之上，函数式编程，调试成本相对较高
+
+## 同步 vs 异步 以及 阻塞 vs 非阻塞
+
+关于同步和异步，主流的观点认为, 同步和异步关注消息通讯机制，而阻塞和非阻塞， 关注的是程序在等待调用结果时的状态
+
+- 同步  
+发出调用后, 获得结果后返回, 由调用方主动等待结果
+- 异步  
+与同步相反, 发出调用后, 调用就直接返回, 调用者不会立刻得到结果, 而是由被调用者在执行完毕后将结果通过状态、通知、回调来通知调用者
+- 阻塞  
+指的是结果返回之前， 线程会被挂起， 得到结果之后才会返回
+- 非阻塞  
+非阻塞调用指的是当前线程不会被阻塞，可能得到完整的结果，也可能是不完整的结果，或者没有结果
+
+> 异步和非阻塞的区别， 主要在于结果的返回方式和内容不同， 异步调用和非阻塞调用都需要操作系统的支持，异步操作的执行者是被调用方，而非阻塞调用的执行者是调用方  
+
+简单总结一下，同步和异步，区别在于是事情由调用方完成还是由被调用方完成，阻塞和非阻塞，区别在于干活的时候是否必须一直干当前事情直接事情完成
+
+## 网络I/O模型
+
+- 网络收包过程
+
+网络收包过程可以简化为数据包到来后的事件通知和事件响应取出数据包，具体过程大概是
+网卡通知数据包到来 -> 网络协议栈收包 -> 将数据包填入socket接收队列 -> 通知应用程序数据收包事件 -> 应用程序从socket的接收缓冲队列取出数据包
+从操作系统的角度看，就是数据从网卡到内核，然后从内核到应用程序
+而I/O模型主要的区别就在于收包过程中事件通知和事件响应方式的不同
+
+- 同步阻塞IO
+线程通过系统调用发起IO操作，内核执行IO操作，在操作完毕后，结果返回，线程拿到结果
+整个IO请求过程中，线程是被阻塞的，发起IO请求后不能做任何事情，浪费CPU资源
+通过多进程，可以缓解由此导致的资源浪费，显然，这种方案无法处理大量的并发请求，也就是著名的C10K问题
+早期服务以这种简单的IO模型提供，当时服务的规模还比较小 
+- 同步非阻塞IO
+该模型改良了线程阻塞的问题，在执行IO请求后可以立即返回
+但因为I/O并未执行完成，需要不断发起请求，轮询获得结果，这会消耗大量的CPU资源
+因为非阻塞的特性，为提高服务器的吞吐能力提供了可能 
+- IO多路复用
+IO多路复用改进了非阻塞I/O的不断轮询的问题，通过select机制，对多个socket的状态轮询，将多个IO请求，通过一个线程来完成，能够有效提升服务并发能力
+IO多路复用经历3次API的改进：select -> poll -> epoll
+select：可移植性最强，存在文件描述符数量的限制，存在大量的用户态/内核态文件描述符拷贝
+poll：消除了文件描述符的数量限制，引入了event的设计思想，仍然存在文件描述符拷贝的问题
+epoll：通过事件通知机制，大大提升高负载时的服务器性能，同时也简化了编程模型 
+- 信号驱动
+信号驱动是一种不常用的IO模型，通过注册信号处理函数，IO完成后，内核发送IO完成信号，信号处理程序通过调用IO函数处理数据 
+- 异步调用
+异步IO是网络IO的终极模型，通过注册I/O系统调用aio_read，告知内核I/O相关信息，然后立刻返回，当内核将数据拷贝到用户态后，通知应用程序，全程无需应用程序参与 
+
+java栈的网络编程可以看大神的介绍：nio : [scalable io in java](http://gee.cs.oswego.edu/dl/cpjslides/nio.pdf)
+
+## Reactor模式
+
+Reactor是一种经典的编程模式，主要组件有disptcher，accptor和handler
+有3中实现方式，分别是单线程Reactor，线程池化Reactor和Multiple Reactor
+
+### 单线程Reactor
+单线程Reactor通过一个线程来完成所有的过程，redis的实现颇有单线程Reactor的味道
+
+这种实现方式的瓶颈是单线程，资源使用率低
+### 多线程Reactor
+针对单线程Reactor的问题，将handler组件线程池化，能够有效处理IO请求
+
+多线程Reactor在高负载时，acceptor可能会产生饥饿等待的问题
+### Multiple Reactor
+Multiple Reactor也称主从Reactor，将acceptor组件独立称mainReactor组件，subReactor负责事件分发，handler线程池处理数据
+
+netty提供了单线程Reactor和Multiple Reactor的支持，通过设置bossGroup和workerGroup可以灵活选择哪种模式，tomcat底层使用的也是Multiple Reactor模式，Acceptor线程相当于mainReactor，poller线程相当于subReactor，工作线程处理数据
+
+写到这里，web底层其实已经提供了相当强的非阻塞能力，但是，应用层的Servlet API是阻塞式的，当出现大量的阻塞请求时，会耗尽线程池资源，降低服务器的吞吐量
+如何进一步提升服务器的处理能力？当前的解决方案是响应式，目前的响应式框架有RxJava，Akka和Spring WebFlux等，团队目前使用的是Akka，由于Akka是scala编写的，对java程序员不够友好，java栈生态更好，转向Spring WebFlux栈是必然的选择
+
+## 使用WebFlux
+
+当前的项目为一个Spring MVC的项目，使用tomcat war包部署（必须使用tomcat，这个很坑），项目需要完成前端静态资源的托管和页面请求的响应，改造需要引入Springboot和Spring WebFlux
+引入Springboot很简单，加入依赖即可
+Springboot的加载逻辑会根据底层的依赖包来选择启用MVC栈还是Reactive栈，添加依赖Spring-boot-starter-WebFlux，Springboot会自动创建Reactive web栈，当然，更好的方式是显示启动，比如加上EnableWebFlux
+
+- war包部署改造
+
+对于常规的Servlet API栈war包部署，Springboot提供了很好的支持
+
+- 修改maven产物形式
+因为本来就是war包部署，这一步不用操作
+- 添加Servlet初始化
+让入口类继承SpringBootServletInitializer，使得程序能够与Servlet建立联系
+
+
+
+- war包部署WebFlux改造
+
+Springboot不支持Reactive栈war包部署，需要定制实现war包部署
+添加EnableWebFlux注解，实现WebFluxConfigurer接口，在这里配置静态资源映射和cros处理
+定制核心在继承AbstractReactiveWebInitializer，然后将上面的资源配置进来
+
+
+
+至此，我们可以发现Spring WebFlux war已经可以在tomcat种运行起来
+这里存在的问题是当前版本的Application Context没有刷新，而项目在不同的环境使用了不同的配置，导致的直接结果是我们的属性配置无法注入，这里有两种解决方案，第一种，重载刷新Application Context，第二种，直接使用属性注入
+第一种方案依赖实现细节，以第二种方案为例，这也是一种配置方法
+
+
+
+## 其他需要注意的问题
+
+- 本地调试与war部署的兼容性问题
+本地调试直接添加SpringBootApplication即可，能够和AppInitializer兼容，注意AppInitializer不要直接注册为Bean
+这样，本地调试继续使用spring-boot:run，当执行war部署时，不会使用springboot启动
+- 使用WebFilter替换interceptor
+这里的Filter非Servlet的Filter，之前的interceptor实现可以使用WebFilter替换
+- advice可以使用ResponseBodyResultHandler替换
+这里需要注意在Reactive栈，HandlerResultHandler只有一个生效，多个advice可以继承到一个Handler中或者使用Filter实现
+- context path可以使用WebFilter实现
+
+至此，项目已经可以工作起来了
+
+需要注意的是，因为之前的逻辑仍是阻塞式的，直接使用WebFlux会有性能损失
+
+留下的问题
+
+记录没有讨论响应式，也没有对WebFlux的细节进行讨论，后续就这些问题展开
